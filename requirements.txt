@@ -1,0 +1,10 @@
+# Colab has most of these preinstalled; listed for reproducibility.
+numpy
+scipy
+pandas
+matplotlib
+opencv-python
+mediapipe
+scikit-learn
+torch
+tqdm
