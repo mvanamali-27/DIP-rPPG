@@ -6,8 +6,7 @@ from pathlib import Path
 # works on Colab (Drive) and locally. You can always override by passing a path
 # to data.find_subjects(...). If your Drive folder is named differently, edit
 # COLAB_DATA below to match.
-COLAB_DATA = Path("/content/drive/MyDrive/DIP_rPPG_data/rppg dataset")
-
+COLAB_DATA = Path("/content/drive/MyDrive/RPPG_DATASET")
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _candidates = [
     COLAB_DATA,
