@@ -99,3 +99,38 @@ def true_hr_per_window(ppg, fps, **window_args):
     real rate goes above it. The waveform itself is fine, so we measure from it.
     """
     return hr_per_window(bandpass(ppg - np.mean(ppg), fps), fps, **window_args)
+
+
+
+# ------------------------------------------------- 2f: POS (a smarter pulse)
+def pos_pulse(rgb, fps, window_sec=1.6):
+    """POS rPPG method (Wang et al., 2017, "Algorithmic Principles of Remote PPG").
+
+    Green-only struggles when lighting changes or the head moves, because those
+    change all three colors at once. POS uses R, G and B together:
+      1. In short windows (1.6 s -- at least one heartbeat, too short for the
+         lighting to drift much), express each color as relative change.
+      2. Mix the three colors into two signals with fixed weights:
+             S1 = G - B          S2 = G + B - 2R
+         Each row of weights adds up to zero, so a plain brightness change
+         (which scales R, G and B equally) cancels out completely.
+      3. Combine them as S1 + (std S1 / std S2) * S2. Motion and lighting noise
+         show up in both signals in a matching way, so scaling them to the same
+         size and adding cancels most of it, while the pulse survives.
+      4. Overlap-add the short windows into one long signal, bandpass it, and
+         flip it so it points the same way as the finger clip (like green_pulse).
+    Returns a 1-D pulse of length T, the same shape as green_pulse.
+    """
+    rgb = fill_gaps(rgb)
+    T = len(rgb)
+    win = int(round(window_sec * fps))
+    P = np.array([[0, 1, -1],
+                  [-2, 1, 1]])
+    pulse = np.zeros(T)
+    for start in range(T - win + 1):
+        C = rgb[start:start + win].T                      # shape (3, win)
+        Cn = C / C.mean(axis=1, keepdims=True)            # relative change per color
+        S1, S2 = P @ Cn                                   # two mixed signals
+        h = S1 + (S1.std() / (S2.std() + 1e-12)) * S2
+        pulse[start:start + win] += h - h.mean()          # overlap-add
+    return -bandpass(pulse, fps)
