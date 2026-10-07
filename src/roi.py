@@ -116,3 +116,57 @@ def roi_masks(landmarks, frame_shape):
         cv2.fillPoly(mask, [outline], 1)
         masks[name] = mask.astype(bool)
     return masks
+
+
+
+# ------------------------------------------------- 2c: skin color over time
+SKIN_BRIGHTNESS = 0.75   # keep pixels at least 75% as bright as this face's cheeks
+
+
+def skin_masks(frame_rgb, masks):
+    """Drop non-skin pixels (hair, eyebrows, glasses frames) from each region.
+
+    Textbook skin detection thresholds the COLOR channels (Cr/Cb of YCrCb), but in
+    these videos hair and skin have almost the same color -- they differ in
+    BRIGHTNESS. So we keep only pixels at least SKIN_BRIGHTNESS times as bright as
+    the cheeks, which are reliably clean skin. Because the reference is this
+    person's own cheeks in this frame, it adapts to skin tone and lighting.
+    """
+    brightness = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2YCrCb)[..., 0]
+    cheeks = masks["cheek_left"] | masks["cheek_right"]
+    threshold = SKIN_BRIGHTNESS * np.median(brightness[cheeks])
+    bright_enough = brightness >= threshold
+    return {name: m & bright_enough for name, m in masks.items()}
+
+
+def extract_rgb(video_path):
+    """Average skin color of each region, in every frame of a video.
+
+    Returns (traces, fps):
+        traces: dict of region name -> array of shape (T, 3): the mean R, G, B
+                of that region's skin pixels in each of the T frames. "all" pools
+                every region's pixels together. Frames with no face (or no skin
+                pixels) hold NaN ("not a number") so we can spot and fill them later.
+        fps:    the video's real frame rate.
+    """
+    fps = video_info(video_path)["fps"]
+    names = list(ROI_LANDMARKS) + ["all"]
+    traces = {name: [] for name in names}
+    missing = [np.nan, np.nan, np.nan]
+
+    # video mode: the face is tracked from frame to frame. Timestamps must keep
+    # increasing, so every video gets its own fresh landmarker.
+    with make_landmarker(video_mode=True) as landmarker:
+        for i, frame in enumerate(iter_frames(video_path)):
+            pts = face_landmarks(landmarker, frame, timestamp_ms=int(i * 1000 / fps))
+            if pts is None:
+                for name in names:
+                    traces[name].append(missing)
+                continue
+            masks = skin_masks(frame, roi_masks(pts, frame.shape))
+            masks["all"] = masks["forehead"] | masks["cheek_left"] | masks["cheek_right"]
+            for name in names:
+                m = masks[name]
+                traces[name].append(frame[m].mean(axis=0) if m.any() else missing)
+
+    return {name: np.array(rows, dtype=float) for name, rows in traces.items()}, fps
