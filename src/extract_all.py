@@ -19,7 +19,6 @@ from pathlib import Path
 import numpy as np
 
 import data
-import roi
 import signal_proc as sp
 
 CACHE_NAME = "signals.npz"
@@ -32,6 +31,7 @@ def cache_path(video_path):
 
 def process_subject(video_path, gt_path):
     """One video + its ground truth -> dict of arrays. This is the slow part."""
+    import roi   # MediaPipe lives in roi, so it's only needed when processing videos
     traces, fps = roi.extract_rgb(video_path)
     ppg, _, _ = data.load_ground_truth(gt_path)          # device HR row: not used
     T = min(len(traces["all"]), len(ppg))                # trim both to the same length
