@@ -1,85 +1,76 @@
-"""Step 3.1 (shared by both models): turn every subject's saved signals into ONE
-dataset of 10-second windows, each labelled with its true heart rate.
+"""Step 2g: run the slow image processing ONCE per subject and save the result
+next to each video, so nobody ever has to process the videos again.
 
-Both models (and the classical baselines) use exactly these windows, so their
-scores are directly comparable.
+Each subject folder gets a `signals.npz` holding:
+    rgb               (T, 3)  mean skin R, G, B per frame, all regions pooled
+    rgb_forehead      (T, 3)  \
+    rgb_cheek_left    (T, 3)   > the same, for each region separately
+    rgb_cheek_right   (T, 3)  /
+    pulse             (T,)    POS pulse wave (step 2f), clean and bandpassed
+    ppg               (T,)    the finger clip's waveform = the ground truth
+    t                 (T,)    time of each frame, in seconds
+    fps               ()      the video's frame rate
+The device's heart-rate row is deliberately NOT saved: it's capped at 127 bpm.
 """
+import os
+import time
+from pathlib import Path
+
 import numpy as np
 
-import config
 import data
-import extract_all
 import signal_proc as sp
 
-FPS_OUT = 30.0                                  # every signal is resampled to exactly 30 frames/s
-WINDOW_LEN = int(config.WINDOW_SEC * FPS_OUT)   # so every window is exactly 300 samples long
-DATASET_PATH = config.DATA_DIR / "dataset.npz"  # saved in the shared Drive folder
+CACHE_NAME = "signals.npz"
 
 
-def resample(signal, fps_in, fps_out=FPS_OUT):
-    """Re-draw a signal at a new frame rate (e.g. 29.79 -> 30 frames/s) by drawing
-    straight lines between neighbouring samples. Works on shape (T,) or (T, 3)."""
-    signal = np.asarray(signal, dtype=float)
-    t_in = np.arange(len(signal)) / fps_in
-    t_out = np.arange(0, t_in[-1], 1 / fps_out)
-    if signal.ndim == 1:
-        return np.interp(t_out, t_in, signal)
-    return np.stack([np.interp(t_out, t_in, signal[:, c])
-                     for c in range(signal.shape[1])], axis=1)
+def cache_path(video_path):
+    """Where a subject's saved signals live: right next to its video."""
+    return Path(video_path).parent / CACHE_NAME
 
 
-def window_starts(n_samples, fps=FPS_OUT, window_sec=config.WINDOW_SEC,
-                  stride_sec=config.STRIDE_SEC, margin_sec=1):
-    """Where each window starts: the same windows signal_proc.hr_per_window uses
-    (10 s long, 1 s apart, skipping the first and last second)."""
-    win = int(round(window_sec * fps))
-    hop = int(round(stride_sec * fps))
-    margin = int(round(margin_sec * fps))
-    return np.arange(margin, n_samples - win - margin + 1, hop)
-
-
-def subject_windows(signals):
-    """One subject's saved signals (from extract_all.load) -> per-window arrays."""
-    fps = signals["fps"]
-    rgb = resample(signals["rgb"], fps)
-    pulse = resample(signals["pulse"], fps)
-    truth_wave = sp.bandpass(resample(signals["ppg"], fps) - signals["ppg"].mean(), FPS_OUT)
-    green_wave = sp.green_pulse(rgb, FPS_OUT)
-
-    starts = window_starts(len(rgb))
-    cut = lambda x: np.stack([x[s:s + WINDOW_LEN] for s in starts])
-    bpm_of = lambda waves: np.array([sp.hr_fft(w, FPS_OUT) for w in waves])
+def process_subject(video_path, gt_path):
+    """One video + its ground truth -> dict of arrays. This is the slow part."""
+    import roi   # MediaPipe lives in roi, so it's only needed when processing videos
+    traces, fps = roi.extract_rgb(video_path)
+    ppg, _, _ = data.load_ground_truth(gt_path)          # device HR row: not used
+    T = min(len(traces["all"]), len(ppg))                # trim both to the same length
+    rgb = sp.fill_gaps(traces["all"][:T])
     return {
-        "rgb": cut(rgb).astype(np.float32),        # (n, 300, 3) raw skin colors -> the CNN's input
-        "pulse": cut(pulse).astype(np.float32),    # (n, 300) POS pulse -> the Random Forest's input
-        "bpm": bpm_of(cut(truth_wave)),            # (n,) TRUE heart rate = the label
-        "bpm_pos": bpm_of(cut(pulse)),             # (n,) classical baseline: POS + FFT
-        "bpm_green": bpm_of(cut(green_wave)),      # (n,) classical baseline: green + FFT
-        "t": (starts + WINDOW_LEN / 2) / FPS_OUT,  # (n,) time of each window's center (s)
+        "rgb": rgb,
+        "rgb_forehead": sp.fill_gaps(traces["forehead"][:T]),
+        "rgb_cheek_left": sp.fill_gaps(traces["cheek_left"][:T]),
+        "rgb_cheek_right": sp.fill_gaps(traces["cheek_right"][:T]),
+        "pulse": sp.pos_pulse(rgb, fps),
+        "ppg": ppg[:T],
+        "t": np.arange(T) / fps,
+        "fps": fps,
     }
 
 
-def build_dataset(path=None):
-    """Window every subject that has a signals.npz, stack them all, and save.
+def build_all(data_dir=None, overwrite=False):
+    """Process every subject that isn't saved yet.
 
-    'subject' records which person each window came from -- that's what lets us
-    test on people the model has never seen (Leave-One-Subject-Out).
+    Safe to re-run: finished subjects are skipped, so if Colab disconnects halfway
+    you just run it again. Each file is written under a temporary name and renamed
+    only when complete, so a half-written file can never look finished.
     """
-    parts = []
-    for sid, video, gt in data.find_subjects():
-        if not extract_all.cache_path(video).exists():
-            print(f"{sid}: no signals.npz yet, skipping")
+    subjects = data.find_subjects(data_dir)
+    for i, (sid, video, gt) in enumerate(subjects, 1):
+        out = cache_path(video)
+        if out.exists() and not overwrite:
+            print(f"[{i}/{len(subjects)}] {sid}: already saved, skipping")
             continue
-        w = subject_windows(extract_all.load(video))
-        w["subject"] = np.array([sid] * len(w["bpm"]))
-        parts.append(w)
-    dataset = {key: np.concatenate([p[key] for p in parts]) for key in parts[0]}
-    np.savez(path or DATASET_PATH, **dataset)
-    print(f"saved {len(dataset['bpm'])} windows from {len(parts)} subjects -> {path or DATASET_PATH}")
-    return dataset
+        t0 = time.time()
+        partial = out.with_name("signals.partial.npz")
+        np.savez(partial, **process_subject(video, gt))
+        os.replace(partial, out)
+        print(f"[{i}/{len(subjects)}] {sid}: saved ({time.time() - t0:.0f} s)")
 
 
-def load_dataset(path=None):
-    """The saved dataset as a dict of arrays."""
-    with np.load(path or DATASET_PATH) as z:
-        return {key: z[key] for key in z.files}
+def load(video_path):
+    """One subject's saved signals, as a dict of arrays (fps as a plain number)."""
+    with np.load(cache_path(video_path)) as z:
+        signals = {key: z[key] for key in z.files}
+    signals["fps"] = float(signals["fps"])
+    return signals
