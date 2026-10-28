@@ -58,7 +58,7 @@ def subject_windows(signals):
     }
 
 
-def build_dataset(path=None):
+def build_dataset(path=None, data_dir=None):
     """Window every subject that has a signals.npz, stack them all, and save.
 
     'subject' records which person each window came from -- that's what lets us
@@ -66,7 +66,7 @@ def build_dataset(path=None):
     """
     import extract_all   # imported here, so loading the dataset never needs MediaPipe
     parts = []
-    for sid, video, gt in data.find_subjects():
+    for sid, video, gt in data.find_subjects(data_dir):
         if not extract_all.cache_path(video).exists():
             print(f"{sid}: no signals.npz yet, skipping")
             continue
